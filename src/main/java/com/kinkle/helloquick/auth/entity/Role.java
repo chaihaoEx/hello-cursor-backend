@@ -43,7 +43,7 @@ public class Role {
     @Column(name = "description", columnDefinition = "TEXT")
     private String description;
 
-    @Column(name = "status", nullable = false)
+    @Column(name = "status", nullable = false, columnDefinition = "TINYINT(1)")
     @Builder.Default
     private Integer status = 1;
 
