@@ -25,7 +25,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -54,8 +53,6 @@ class UserRoleServiceTest {
 
     private Role adminRole;
     private Role userRole;
-    private UserRole userRoleAssociation;
-
     @BeforeEach
     void setUp() {
         // 初始化测试数据
@@ -73,7 +70,7 @@ class UserRoleServiceTest {
                 .status(1)
                 .build();
 
-        userRoleAssociation = UserRole.builder()
+        UserRole.builder()
                 .id(1L)
                 .userId(100L)
                 .roleId(1L)
