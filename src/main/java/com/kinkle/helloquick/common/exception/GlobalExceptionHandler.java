@@ -10,6 +10,7 @@ import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.stream.Collectors;
 
@@ -85,6 +86,26 @@ public class GlobalExceptionHandler {
         log.warn("非法参数: {}", e.getMessage());
         return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body(Result.failure(ResultCode.PARAM_ERROR, e.getMessage()));
+    }
+
+    /**
+     * 处理静态资源未找到异常
+     * 常见于浏览器请求favicon.ico等静态资源
+     *
+     * @param e 静态资源未找到异常
+     * @return 统一响应格式
+     */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<Result<Void>> handleNoResourceFoundException(NoResourceFoundException e) {
+        // 对于favicon.ico等静态资源请求，记录为debug级别，不记录为错误
+        if (e.getResourcePath() != null && e.getResourcePath().contains("favicon.ico")) {
+            log.debug("静态资源未找到: {}", e.getResourcePath());
+        } else {
+            log.warn("静态资源未找到: {}", e.getResourcePath());
+        }
+        
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(Result.failure(ResultCode.NOT_FOUND, "请求的资源不存在"));
     }
 
     /**

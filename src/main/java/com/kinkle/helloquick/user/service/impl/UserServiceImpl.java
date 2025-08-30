@@ -8,6 +8,8 @@ import com.kinkle.helloquick.user.repository.UserRepository;
 import com.kinkle.helloquick.user.service.UserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
@@ -69,28 +71,31 @@ public class UserServiceImpl implements UserService {
         return convertToDTO(savedUser);
     }
 
-    @Override
+        @Override
+    @Cacheable(value = "user", key = "#id")
     public UserDTO getUserById(Long id) {
         log.debug("根据ID获取用户: {}", id);
-
+        
         User user = userRepository.findById(id)
                 .orElseThrow(() -> BusinessException.dataNotFound("用户"));
-
+        
         return convertToDTO(user);
     }
 
-    @Override
+        @Override
+    @Cacheable(value = "user", key = "'username:' + #username")
     public UserDTO getUserByUsername(String username) {
         log.debug("根据用户名获取用户: {}", username);
-
+        
         User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> BusinessException.dataNotFound("用户"));
-
+        
         return convertToDTO(user);
     }
 
     @Override
     @Transactional
+    @CacheEvict(value = "user", allEntries = true)
     public UserDTO updateUser(Long id, UserDTO.UpdateRequest updateRequest) {
         log.info("更新用户信息: ID={}", id);
 
@@ -116,6 +121,7 @@ public class UserServiceImpl implements UserService {
 
     @Override
     @Transactional
+    @CacheEvict(value = "user", allEntries = true)
     public void deleteUser(Long id) {
         log.info("删除用户: ID={}", id);
 
@@ -129,6 +135,7 @@ public class UserServiceImpl implements UserService {
 
     @Override
     @Transactional
+    @CacheEvict(value = {"user", "userStats"}, allEntries = true)
     public void enableUser(Long id) {
         log.info("启用用户: ID={}", id);
 
@@ -142,6 +149,7 @@ public class UserServiceImpl implements UserService {
 
     @Override
     @Transactional
+    @CacheEvict(value = {"user", "userStats"}, allEntries = true)
     public void disableUser(Long id) {
         log.info("禁用用户: ID={}", id);
 
@@ -220,6 +228,7 @@ public class UserServiceImpl implements UserService {
     }
 
     @Override
+    @Cacheable(value = "userStats", key = "'enabledCount'")
     public long getEnabledUserCount() {
         return userRepository.countEnabledUsers();
     }
