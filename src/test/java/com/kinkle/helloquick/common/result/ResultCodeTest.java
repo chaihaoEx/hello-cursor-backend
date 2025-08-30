@@ -61,7 +61,7 @@ class ResultCodeTest {
         void testDataNotFoundCode() {
             // When & Then
             assertAll(
-                () -> assertEquals(404, ResultCode.DATA_NOT_FOUND.getCode()),
+                () -> assertEquals(410, ResultCode.DATA_NOT_FOUND.getCode()),
                 () -> assertEquals("数据不存在", ResultCode.DATA_NOT_FOUND.getMessage())
             );
         }
@@ -164,7 +164,7 @@ class ResultCodeTest {
             ResultCode[] values = ResultCode.values();
 
             // Then
-            assertEquals(9, values.length, "ResultCode枚举数量应该为9个");
+            assertEquals(10, values.length, "ResultCode枚举数量应该为10个");
         }
     }
 

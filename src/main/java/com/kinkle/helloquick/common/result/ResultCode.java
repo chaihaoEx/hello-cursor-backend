@@ -36,9 +36,14 @@ public enum ResultCode {
     FORBIDDEN(403, "禁止访问"),
 
     /**
+     * 资源不存在
+     */
+    NOT_FOUND(404, "资源不存在"),
+
+    /**
      * 数据不存在
      */
-    DATA_NOT_FOUND(404, "数据不存在"),
+    DATA_NOT_FOUND(410, "数据不存在"),
 
     /**
      * 数据已存在
