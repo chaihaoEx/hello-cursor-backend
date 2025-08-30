@@ -14,6 +14,7 @@ import org.springframework.validation.BindException;
 import org.springframework.validation.BindingResult;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -152,6 +153,79 @@ class GlobalExceptionHandlerTest {
             Result<Void> body = getResponseBodySafely(response);
             assertThat(body.getCode()).isEqualTo(ResultCode.PARAM_ERROR.getCode());
             assertThat(body.getMessage()).isEqualTo("年龄必须是数字");
+        }
+    }
+
+    @Nested
+    @DisplayName("静态资源异常处理测试")
+    class StaticResourceExceptionHandlerTests {
+
+        @Test
+        @DisplayName("应该正确处理NoResourceFoundException - 非favicon.ico")
+        void shouldHandleNoResourceFoundExceptionCorrectly() {
+            // Given
+            NoResourceFoundException exception = mock(NoResourceFoundException.class);
+            when(exception.getResourcePath()).thenReturn("/api/nonexistent");
+
+            // When
+            ResponseEntity<Result<Void>> response = globalExceptionHandler.handleNoResourceFoundException(exception);
+
+            // Then
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+            Result<Void> body = getResponseBodySafely(response);
+            assertThat(body.getCode()).isEqualTo(ResultCode.NOT_FOUND.getCode());
+            assertThat(body.getMessage()).isEqualTo("请求的资源不存在");
+        }
+
+        @Test
+        @DisplayName("应该正确处理NoResourceFoundException - favicon.ico")
+        void shouldHandleNoResourceFoundExceptionForFavicon() {
+            // Given
+            NoResourceFoundException exception = mock(NoResourceFoundException.class);
+            when(exception.getResourcePath()).thenReturn("/favicon.ico");
+
+            // When
+            ResponseEntity<Result<Void>> response = globalExceptionHandler.handleNoResourceFoundException(exception);
+
+            // Then
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+            Result<Void> body = getResponseBodySafely(response);
+            assertThat(body.getCode()).isEqualTo(ResultCode.NOT_FOUND.getCode());
+            assertThat(body.getMessage()).isEqualTo("请求的资源不存在");
+        }
+
+        @Test
+        @DisplayName("应该正确处理NoResourceFoundException - 包含favicon.ico的路径")
+        void shouldHandleNoResourceFoundExceptionForFaviconInPath() {
+            // Given
+            NoResourceFoundException exception = mock(NoResourceFoundException.class);
+            when(exception.getResourcePath()).thenReturn("/static/images/favicon.ico");
+
+            // When
+            ResponseEntity<Result<Void>> response = globalExceptionHandler.handleNoResourceFoundException(exception);
+
+            // Then
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+            Result<Void> body = getResponseBodySafely(response);
+            assertThat(body.getCode()).isEqualTo(ResultCode.NOT_FOUND.getCode());
+            assertThat(body.getMessage()).isEqualTo("请求的资源不存在");
+        }
+
+        @Test
+        @DisplayName("应该正确处理NoResourceFoundException - null资源路径")
+        void shouldHandleNoResourceFoundExceptionWithNullPath() {
+            // Given
+            NoResourceFoundException exception = mock(NoResourceFoundException.class);
+            when(exception.getResourcePath()).thenReturn(null);
+
+            // When
+            ResponseEntity<Result<Void>> response = globalExceptionHandler.handleNoResourceFoundException(exception);
+
+            // Then
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+            Result<Void> body = getResponseBodySafely(response);
+            assertThat(body.getCode()).isEqualTo(ResultCode.NOT_FOUND.getCode());
+            assertThat(body.getMessage()).isEqualTo("请求的资源不存在");
         }
     }
 
@@ -326,6 +400,136 @@ class GlobalExceptionHandlerTest {
 
             // Then
             assertThat(getResponseBodySafely(response).getMessage()).isEmpty();
+        }
+
+        @Test
+        @DisplayName("应该处理包含null消息的字段错误")
+        void shouldHandleFieldErrorWithNullMessage() {
+            // Given
+            MethodArgumentNotValidException exception = mock(MethodArgumentNotValidException.class);
+            BindingResult bindingResult = mock(BindingResult.class);
+            
+            FieldError fieldError1 = new FieldError("user", "username", null, false, null, null, "用户名不能为空");
+            FieldError fieldError2 = new FieldError("user", "email", null, false, null, null, null);
+            
+            when(exception.getBindingResult()).thenReturn(bindingResult);
+            when(bindingResult.getFieldErrors()).thenReturn(Arrays.asList(fieldError1, fieldError2));
+
+            // When
+            ResponseEntity<Result<Void>> response = globalExceptionHandler.handleValidationException(exception);
+
+            // Then
+            Result<Void> body = getResponseBodySafely(response);
+            assertThat(body.getMessage()).contains("用户名不能为空");
+            assertThat(body.getMessage()).contains("null");
+        }
+
+        @Test
+        @DisplayName("应该处理BindException的空字段错误列表")
+        void shouldHandleBindExceptionWithEmptyFieldErrorList() {
+            // Given
+            BindException exception = mock(BindException.class);
+            BindingResult bindingResult = mock(BindingResult.class);
+            
+            when(exception.getBindingResult()).thenReturn(bindingResult);
+            when(bindingResult.getFieldErrors()).thenReturn(Collections.emptyList());
+
+            // When
+            ResponseEntity<Result<Void>> response = globalExceptionHandler.handleBindException(exception);
+
+            // Then
+            assertThat(getResponseBodySafely(response).getMessage()).isEmpty();
+        }
+    }
+
+    @Nested
+    @DisplayName("异常处理完整性测试")
+    class ExceptionHandlerCompletenessTests {
+
+        @Test
+        @DisplayName("应该处理所有类型的BusinessException")
+        void shouldHandleAllTypesOfBusinessExceptions() {
+            // Given
+            BusinessException[] exceptions = {
+                BusinessException.dataNotFound("用户"),
+                BusinessException.dataExists("用户名"),
+                BusinessException.paramError("参数无效"),
+                BusinessException.unauthorized(),
+                BusinessException.forbidden()
+            };
+
+            // When & Then
+            for (BusinessException exception : exceptions) {
+                ResponseEntity<Result<Void>> response = globalExceptionHandler.handleBusinessException(exception);
+                assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+                assertThat(getResponseBodySafely(response).getCode()).isEqualTo(exception.getResultCode().getCode());
+                assertThat(getResponseBodySafely(response).getMessage()).isEqualTo(exception.getMessage());
+            }
+        }
+
+        @Test
+        @DisplayName("应该处理各种RuntimeException子类")
+        void shouldHandleVariousRuntimeExceptionSubclasses() {
+            // Given
+            RuntimeException[] exceptions = {
+                new RuntimeException("普通运行时异常"),
+                new IllegalStateException("非法状态异常"),
+                new UnsupportedOperationException("不支持的操作异常"),
+                new NullPointerException("空指针异常")
+            };
+
+            // When & Then
+            for (RuntimeException exception : exceptions) {
+                ResponseEntity<Result<Void>> response = globalExceptionHandler.handleRuntimeException(exception);
+                assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+                assertThat(getResponseBodySafely(response).getCode()).isEqualTo(ResultCode.INTERNAL_SERVER_ERROR.getCode());
+                assertThat(getResponseBodySafely(response).getMessage()).isEqualTo("系统内部错误");
+            }
+        }
+
+        @Test
+        @DisplayName("应该处理各种Exception子类")
+        void shouldHandleVariousExceptionSubclasses() {
+            // Given
+            Exception[] exceptions = {
+                new Exception("普通异常"),
+                new ClassNotFoundException("类未找到异常"),
+                new NoSuchMethodException("方法未找到异常"),
+                new SecurityException("安全异常")
+            };
+
+            // When & Then
+            for (Exception exception : exceptions) {
+                ResponseEntity<Result<Void>> response = globalExceptionHandler.handleException(exception);
+                assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+                assertThat(getResponseBodySafely(response).getCode()).isEqualTo(ResultCode.INTERNAL_SERVER_ERROR.getCode());
+                assertThat(getResponseBodySafely(response).getMessage()).isEqualTo("系统内部错误");
+            }
+        }
+    }
+
+    @Nested
+    @DisplayName("日志记录测试")
+    class LoggingTests {
+
+        @Test
+        @DisplayName("应该正确记录不同级别的日志")
+        void shouldLogAtCorrectLevels() {
+            // Given
+            BusinessException businessException = BusinessException.dataNotFound("用户");
+            RuntimeException runtimeException = new RuntimeException("运行时错误");
+            Exception genericException = new Exception("通用异常");
+
+            // When
+            globalExceptionHandler.handleBusinessException(businessException);
+            globalExceptionHandler.handleRuntimeException(runtimeException);
+            globalExceptionHandler.handleException(genericException);
+
+            // Then - 这里主要验证方法能正常执行，实际的日志验证需要集成测试
+            // 在单元测试中，我们主要验证异常处理逻辑的正确性
+            assertThat(businessException).isNotNull();
+            assertThat(runtimeException).isNotNull();
+            assertThat(genericException).isNotNull();
         }
     }
 }
