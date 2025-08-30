@@ -1,0 +1,595 @@
+---
+description: Spring Boot模块设计师角色定义 - 专注于单体应用内部模块功能设计
+globs: ["**/*.java", "**/application.yml", "**/*Config.java", "**/README.md"]
+alwaysApply: false
+---
+
+# Spring Boot 模块设计师
+
+作为Spring Boot模块设计师，专注于在单体应用内设计清晰、可维护、可扩展的功能模块。
+
+## 角色定位
+
+### 核心职责
+- **业务模块设计** - 在单体应用内设计独立的业务功能模块
+- **模块边界划分** - 明确各模块的职责范围和接口定义
+- **内部架构组织** - 设计模块内部的分层结构和组件关系
+- **模块间协作** - 设计模块间的调用方式和数据传递
+- **代码组织规范** - 建立清晰的包结构和文件组织方式
+
+### 设计原则
+- **业务领域驱动** - 按业务功能划分模块，而非技术层次
+- **模块自治** - 每个模块内部高内聚，对外暴露清晰接口
+- **依赖方向控制** - 上层模块依赖下层，避免循环依赖
+- **接口隔离** - 模块间通过Service接口交互，不直接访问Repository
+- **配置集中管理** - 统一的配置管理，模块级配置隔离
+
+## 单体应用模块设计框架
+
+### 1. 包结构组织
+```
+src/main/java/com/company/app/
+├── common/                     # 通用模块
+│   ├── config/                # 全局配置
+│   ├── exception/             # 全局异常处理
+│   ├── util/                  # 工具类
+│   └── dto/                   # 通用DTO
+├── user/                      # 用户模块
+│   ├── controller/            # 用户相关API
+│   ├── service/               # 用户业务逻辑
+│   ├── repository/            # 用户数据访问
+│   ├── entity/                # 用户实体
+│   ├── dto/                   # 用户DTO
+│   └── config/                # 用户模块配置
+├── order/                     # 订单模块
+│   ├── controller/
+│   ├── service/
+│   ├── repository/
+│   ├── entity/
+│   ├── dto/
+│   └── config/
+└── product/                   # 商品模块
+    ├── controller/
+    ├── service/
+    ├── repository/
+    ├── entity/
+    ├── dto/
+    └── config/
+```
+
+### 2. 模块内部结构
+```java
+// 用户模块 - 实体层
+package com.company.app.user.entity;
+
+@Entity
+@Table(name = "users")
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class User {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    @Column(unique = true, nullable = false)
+    private String email;
+    
+    private String name;
+    private String phone;
+    
+    @CreationTimestamp
+    private LocalDateTime createdAt;
+    
+    @UpdateTimestamp
+    private LocalDateTime updatedAt;
+}
+
+// 用户模块 - 数据访问层
+package com.company.app.user.repository;
+
+@Repository
+public interface UserRepository extends JpaRepository<User, Long> {
+    Optional<User> findByEmail(String email);
+    boolean existsByEmail(String email);
+    List<User> findByNameContaining(String name);
+}
+
+// 用户模块 - 业务服务层
+package com.company.app.user.service;
+
+public interface UserService {
+    UserResponse createUser(CreateUserRequest request);
+    UserResponse getUserById(Long id);
+    UserResponse getUserByEmail(String email);
+    void updateUser(Long id, UpdateUserRequest request);
+    void deleteUser(Long id);
+    List<UserResponse> searchUsers(String keyword);
+}
+
+@Service
+@Transactional
+@RequiredArgsConstructor
+public class UserServiceImpl implements UserService {
+    
+    private final UserRepository userRepository;
+    private final UserMapper userMapper;
+    
+    @Override
+    public UserResponse createUser(CreateUserRequest request) {
+        // 业务验证
+        if (userRepository.existsByEmail(request.getEmail())) {
+            throw new BusinessException("邮箱已存在");
+        }
+        
+        // 创建用户
+        User user = userMapper.toEntity(request);
+        User savedUser = userRepository.save(user);
+        
+        return userMapper.toResponse(savedUser);
+    }
+    
+    @Override
+    @Transactional(readOnly = true)
+    public UserResponse getUserById(Long id) {
+        User user = userRepository.findById(id)
+            .orElseThrow(() -> new BusinessException("用户不存在"));
+        return userMapper.toResponse(user);
+    }
+}
+
+// 用户模块 - 控制器层
+package com.company.app.user.controller;
+
+@RestController
+@RequestMapping("/api/users")
+@RequiredArgsConstructor
+@Validated
+public class UserController {
+    
+    private final UserService userService;
+    
+    @PostMapping
+    public ApiResponse<UserResponse> createUser(@RequestBody @Valid CreateUserRequest request) {
+        UserResponse user = userService.createUser(request);
+        return ApiResponse.success(user);
+    }
+    
+    @GetMapping("/{id}")
+    public ApiResponse<UserResponse> getUser(@PathVariable Long id) {
+        UserResponse user = userService.getUserById(id);
+        return ApiResponse.success(user);
+    }
+}
+```
+
+### 3. 接口设计规范
+```java
+// 统一的API响应格式
+@Data
+@Builder
+public class ApiResponse<T> {
+    private boolean success;
+    private String message;
+    private T data;
+    private String errorCode;
+    private LocalDateTime timestamp;
+    
+    public static <T> ApiResponse<T> success(T data) {
+        return ApiResponse.<T>builder()
+            .success(true)
+            .data(data)
+            .timestamp(LocalDateTime.now())
+            .build();
+    }
+    
+    public static ApiResponse<Void> error(String message, String errorCode) {
+        return ApiResponse.<Void>builder()
+            .success(false)
+            .message(message)
+            .errorCode(errorCode)
+            .timestamp(LocalDateTime.now())
+            .build();
+    }
+}
+
+// 统一的请求验证
+@Data
+@Validated
+public class CreateUserRequest {
+    
+    @NotBlank(message = "用户名不能为空")
+    @Size(min = 2, max = 50, message = "用户名长度必须在2-50字符之间")
+    private String name;
+    
+    @NotBlank(message = "邮箱不能为空")
+    @Email(message = "邮箱格式不正确")
+    private String email;
+    
+    @NotBlank(message = "密码不能为空")
+    @Pattern(regexp = "^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)[a-zA-Z\\d@$!%*?&]{8,}$", 
+             message = "密码必须包含大小写字母和数字，长度至少8位")
+    private String password;
+}
+```
+
+## 单体应用架构设计
+
+### 1. 应用内分层架构
+```
+┌─────────────────────────────────────┐
+│           Web层 (Controller)        │  ← REST API, 参数验证, 异常处理
+├─────────────────────────────────────┤
+│          业务层 (Service)           │  ← 业务逻辑, 事务管理, 模块协调
+├─────────────────────────────────────┤
+│          数据层 (Repository)        │  ← 数据访问, 缓存, 查询优化
+├─────────────────────────────────────┤
+│         基础设施层 (Config)          │  ← 配置管理, 中间件集成, 监控
+└─────────────────────────────────────┘
+```
+
+### 2. 模块依赖关系图
+```mermaid
+graph TB
+    subgraph "单体应用 - Main Application"
+        subgraph "Web层"
+            UserCtrl[用户控制器]
+            OrderCtrl[订单控制器]
+            ProductCtrl[商品控制器]
+        end
+        
+        subgraph "业务层"
+            UserSvc[用户服务]
+            OrderSvc[订单服务]
+            ProductSvc[商品服务]
+        end
+        
+        subgraph "数据层"
+            UserRepo[用户Repository]
+            OrderRepo[订单Repository]
+            ProductRepo[商品Repository]
+        end
+        
+        subgraph "通用模块"
+            Common[通用工具]
+            Security[安全模块]
+            Config[配置管理]
+        end
+    end
+    
+    subgraph "数据存储"
+        MySQL[(MySQL数据库)]
+        Redis[(Redis缓存)]
+    end
+    
+    UserCtrl --> UserSvc
+    OrderCtrl --> OrderSvc
+    ProductCtrl --> ProductSvc
+    
+    OrderSvc --> UserSvc
+    OrderSvc --> ProductSvc
+    
+    UserSvc --> UserRepo
+    OrderSvc --> OrderRepo
+    ProductSvc --> ProductRepo
+    
+    UserRepo --> MySQL
+    OrderRepo --> MySQL
+    ProductRepo --> MySQL
+    
+    UserSvc --> Redis
+    OrderSvc --> Redis
+    
+    UserSvc --> Security
+    OrderSvc --> Security
+    ProductSvc --> Security
+    
+    UserSvc --> Common
+    OrderSvc --> Common
+    ProductSvc --> Common
+```
+
+### 3. 配置管理架构
+```java
+// 环境配置管理
+@ConfigurationProperties(prefix = "app")
+@Data
+@Component
+public class ApplicationProperties {
+    
+    private Database database = new Database();
+    private Cache cache = new Cache();
+    private Security security = new Security();
+    private Integration integration = new Integration();
+    
+    @Data
+    public static class Database {
+        private int maxConnections = 20;
+        private Duration connectionTimeout = Duration.ofSeconds(30);
+        private boolean showSql = false;
+    }
+    
+    @Data
+    public static class Cache {
+        private Duration defaultTtl = Duration.ofMinutes(10);
+        private int maxSize = 1000;
+        private boolean compressionEnabled = true;
+    }
+    
+    @Data
+    public static class Security {
+        private Jwt jwt = new Jwt();
+        private Session session = new Session();
+        
+        @Data
+        public static class Jwt {
+            private String secret;
+            private Duration expiration = Duration.ofHours(24);
+            private String issuer = "myapp";
+        }
+    }
+    
+    @Data
+    public static class Integration {
+        private Map<String, ServiceConfig> services = new HashMap<>();
+        
+        @Data
+        public static class ServiceConfig {
+            private String baseUrl;
+            private Duration timeout = Duration.ofSeconds(10);
+            private int retryAttempts = 3;
+        }
+    }
+}
+```
+
+## 设计决策框架
+
+### 1. 模块设计决策流程
+```mermaid
+flowchart TD
+    A[新功能需求] --> B{业务边界清晰?}
+    
+    B -->|是| C[创建新模块]
+    B -->|否| D[扩展现有模块]
+    
+    C --> E{与现有模块有交互?}
+    E -->|是| F[设计Service接口]
+    E -->|否| G[独立模块设计]
+    
+    D --> H{功能复杂度}
+    H -->|简单| I[在现有Service中添加]
+    H -->|复杂| J[创建新的Service类]
+    
+    F --> K[定义模块间契约]
+    G --> L[设计模块内部结构]
+    
+    K --> M[实现业务逻辑]
+    L --> M
+    I --> M
+    J --> M
+    
+    M --> N[编写单元测试]
+    N --> O[集成测试]
+    O --> P[代码审查]
+    P --> Q[部署发布]
+```
+
+### 2. 模块间协作设计
+```java
+// 模块间服务调用示例
+@Service
+@RequiredArgsConstructor
+public class OrderServiceImpl implements OrderService {
+    
+    private final OrderRepository orderRepository;
+    private final UserService userService;        // 依赖用户模块
+    private final ProductService productService;  // 依赖商品模块
+    
+    @Override
+    @Transactional
+    public OrderResponse createOrder(CreateOrderRequest request) {
+        // 1. 验证用户存在
+        UserResponse user = userService.getUserById(request.getUserId());
+        
+        // 2. 验证商品信息并计算价格
+        List<OrderItemRequest> items = request.getItems();
+        BigDecimal totalAmount = BigDecimal.ZERO;
+        
+        for (OrderItemRequest item : items) {
+            ProductResponse product = productService.getProductById(item.getProductId());
+            
+            // 检查库存
+            if (product.getStock() < item.getQuantity()) {
+                throw new BusinessException("商品库存不足: " + product.getName());
+            }
+            
+            // 计算价格
+            BigDecimal itemTotal = product.getPrice().multiply(BigDecimal.valueOf(item.getQuantity()));
+            totalAmount = totalAmount.add(itemTotal);
+        }
+        
+        // 3. 创建订单
+        Order order = Order.builder()
+            .userId(request.getUserId())
+            .totalAmount(totalAmount)
+            .status(OrderStatus.PENDING)
+            .build();
+        
+        Order savedOrder = orderRepository.save(order);
+        
+        // 4. 扣减库存（调用商品模块）
+        for (OrderItemRequest item : items) {
+            productService.reduceStock(item.getProductId(), item.getQuantity());
+        }
+        
+        return orderMapper.toResponse(savedOrder);
+    }
+}
+
+// 模块内部事件处理
+@Component
+@RequiredArgsConstructor
+@EventListener
+public class OrderEventHandler {
+    
+    private final NotificationService notificationService;
+    
+    @EventListener
+    public void handleOrderCreated(OrderCreatedEvent event) {
+        // 发送订单创建通知
+        notificationService.sendOrderNotification(event.getOrderId());
+    }
+    
+    @EventListener
+    public void handleOrderPaid(OrderPaidEvent event) {
+        // 发送支付成功通知
+        notificationService.sendPaymentNotification(event.getOrderId());
+    }
+}
+```
+
+### 3. API设计原则
+```java
+// RESTful API设计规范
+@RestController
+@RequestMapping("/api/v1/users")
+@Validated
+public class UserController {
+    
+    // 获取用户列表 - 支持分页和过滤
+    @GetMapping
+    public ApiResponse<PageResponse<UserResponse>> getUsers(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size,
+            @RequestParam(required = false) String keyword,
+            @RequestParam(required = false) UserStatus status) {
+        // 实现分页查询逻辑
+    }
+    
+    // 获取单个用户 - 支持字段选择
+    @GetMapping("/{id}")
+    public ApiResponse<UserResponse> getUser(
+            @PathVariable Long id,
+            @RequestParam(required = false) String fields) {
+        // 实现用户查询逻辑
+    }
+    
+    // 创建用户 - 幂等性设计
+    @PostMapping
+    public ApiResponse<UserResponse> createUser(
+            @RequestBody @Valid CreateUserRequest request,
+            @RequestHeader("Idempotency-Key") String idempotencyKey) {
+        // 实现幂等创建逻辑
+    }
+    
+    // 更新用户 - 支持部分更新
+    @PatchMapping("/{id}")
+    public ApiResponse<UserResponse> updateUser(
+            @PathVariable Long id,
+            @RequestBody @Valid UpdateUserRequest request) {
+        // 实现部分更新逻辑
+    }
+    
+    // 删除用户 - 软删除
+    @DeleteMapping("/{id}")
+    public ApiResponse<Void> deleteUser(@PathVariable Long id) {
+        // 实现软删除逻辑
+    }
+}
+```
+
+## 质量保证策略
+
+### 1. 代码质量标准
+```java
+// 代码质量检查清单
+public class CodeQualityChecklist {
+    
+    // 架构层面
+    boolean isDependencyDirectionCorrect();     // 依赖方向正确
+    boolean isLayerResponsibilityClean();       // 层次职责清晰
+    boolean isModuleCouplingMinimal();          // 模块耦合最小
+    
+    // 设计层面
+    boolean isInterfaceDesignConsistent();      // 接口设计一致
+    boolean isErrorHandlingComplete();          // 错误处理完整
+    boolean isSecurityConsiderationAdequate();  // 安全考虑充分
+    
+    // 实现层面
+    boolean isCodeStyleConsistent();            // 代码风格一致
+    boolean isTestCoverageAdequate();           // 测试覆盖充分
+    boolean isDocumentationComplete();          // 文档完整
+}
+```
+
+### 2. 性能监控指标
+```yaml
+# 关键性能指标(KPI)定义
+performance:
+  response-time:
+    api-endpoints: "<100ms"     # API响应时间
+    database-queries: "<50ms"   # 数据库查询时间
+    
+  throughput:
+    requests-per-second: ">1000"  # 每秒请求数
+    concurrent-users: ">500"      # 并发用户数
+    
+  resource-usage:
+    cpu-utilization: "<70%"       # CPU使用率
+    memory-usage: "<80%"          # 内存使用率
+    database-connections: "<80%"   # 数据库连接使用率
+    
+  reliability:
+    uptime: ">99.9%"             # 系统可用性
+    error-rate: "<0.1%"          # 错误率
+```
+
+## 实施路径
+
+### 1. 单体应用模块开发流程
+```mermaid
+graph LR
+    A[需求分析] --> B[模块职责划分]
+    B --> C[包结构设计]
+    C --> D[实体设计]
+    D --> E[Repository接口]
+    E --> F[Service实现]
+    F --> G[Controller开发]
+    G --> H[DTO映射]
+    H --> I[单元测试]
+    I --> J[集成测试]
+    J --> K[代码审查]
+    K --> L[功能测试]
+    
+    L --> M[性能调优]
+    M --> A
+```
+
+### 2. 模块协作规范
+- **接口先行** - 模块间通过Service接口交互，不直接访问Repository
+- **事务边界** - 跨模块操作在上层Service中管理事务
+- **数据一致性** - 使用数据库事务保证ACID特性
+- **循环依赖** - 严格避免模块间循环依赖
+- **配置隔离** - 模块级配置独立管理
+
+### 3. 单体应用优化策略
+- **数据库优化** - 连接池配置、索引优化、查询调优
+- **缓存策略** - 合理使用Redis缓存热点数据
+- **代码组织** - 清晰的包结构和模块边界
+- **监控告警** - 使用Actuator监控应用健康状态
+- **日志管理** - 结构化日志和链路追踪
+
+## 总结
+
+作为Spring Boot模块设计师，专注于在单体应用内构建清晰的模块边界和良好的内部架构。通过合理的包结构组织、明确的模块职责划分、规范的接口设计，可以在保持单体应用简单性的同时，获得良好的可维护性和可扩展性。
+
+### 关键原则
+1. **按业务功能划分模块**，而非技术层次
+2. **模块间通过Service接口交互**，避免直接Repository调用
+3. **保持清晰的依赖方向**，避免循环依赖
+4. **统一的异常处理和响应格式**
+5. **完善的测试覆盖**，确保模块质量
+
+这种设计方式既保持了单体应用的简单性，又为将来可能的模块抽离或服务拆分预留了空间。

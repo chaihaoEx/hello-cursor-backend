@@ -1,0 +1,860 @@
+---
+description: 内存密集型模块设计指南 - 处理大量内存数据的Spring Boot模块设计策略
+globs: ["**/*Cache*.java", "**/*Memory*.java", "**/*InMemory*.java", "**/*Buffer*.java"]
+alwaysApply: false
+---
+
+# 内存密集型模块设计
+
+针对严重依赖内存数据的模块，提供内存管理、缓存策略和性能优化的设计指南。
+
+## 设计原则
+
+### 核心理念
+- **内存效率优先** - 合理使用内存，避免内存泄漏和溢出
+- **数据分层管理** - 热数据在内存，温数据在缓存，冷数据在数据库
+- **异步加载策略** - 非阻塞的数据加载和更新机制
+- **优雅降级** - 内存不足时的降级处理策略
+- **监控告警** - 完善的内存使用监控和预警机制
+
+### 适用场景
+- **实时计算模块** - 需要频繁计算和快速响应
+- **缓存服务模块** - 大量数据的内存缓存
+- **统计分析模块** - 实时数据聚合和分析
+- **配置中心模块** - 系统配置的内存存储
+- **会话管理模块** - 用户会话数据的内存管理
+
+## 内存数据管理架构
+
+### 1. 分层数据存储策略
+```java
+// 多层级数据存储架构
+@Service
+@RequiredArgsConstructor
+public class MemoryDataManager {
+    
+    // L1: 本地JVM内存缓存
+    private final CacheManager localCacheManager;
+    
+    // L2: Redis分布式缓存
+    private final RedisTemplate<String, Object> redisTemplate;
+    
+    // L3: 数据库持久化存储
+    private final DataRepository dataRepository;
+    
+    // 内存使用监控
+    private final MemoryMonitor memoryMonitor;
+    
+    /**
+     * 智能数据获取策略
+     */
+    public <T> T getData(String key, Class<T> type) {
+        // L1: 检查本地缓存
+        T data = getFromLocalCache(key, type);
+        if (data != null) {
+            return data;
+        }
+        
+        // L2: 检查Redis缓存
+        data = getFromRedisCache(key, type);
+        if (data != null) {
+            // 异步回写到本地缓存
+            putToLocalCacheAsync(key, data);
+            return data;
+        }
+        
+        // L3: 从数据库加载
+        data = loadFromDatabase(key, type);
+        if (data != null) {
+            // 异步写入多级缓存
+            putToAllCachesAsync(key, data);
+        }
+        
+        return data;
+    }
+    
+    /**
+     * 内存压力感知的数据存储
+     */
+    public void putData(String key, Object data, Duration ttl) {
+        MemoryUsage memoryUsage = memoryMonitor.getCurrentUsage();
+        
+        if (memoryUsage.getUsedPercentage() > 80) {
+            // 内存压力大，只存储到Redis
+            putToRedisCache(key, data, ttl);
+            
+            // 触发本地缓存清理
+            triggerLocalCacheEviction();
+            
+        } else if (memoryUsage.getUsedPercentage() > 60) {
+            // 中等内存压力，选择性存储
+            if (isHighPriorityData(data)) {
+                putToLocalCache(key, data, ttl.dividedBy(2)); // 较短TTL
+            }
+            putToRedisCache(key, data, ttl);
+            
+        } else {
+            // 内存充足，全量缓存
+            putToLocalCache(key, data, ttl);
+            putToRedisCache(key, data, ttl.multipliedBy(2)); // 较长TTL
+        }
+    }
+}
+```
+
+### 2. 内存池管理
+```java
+// 对象池管理，减少GC压力
+@Component
+public class MemoryPoolManager {
+    
+    // 大对象池
+    private final ObjectPool<LargeDataObject> largeObjectPool;
+    
+    // 缓冲区池
+    private final ObjectPool<ByteBuffer> bufferPool;
+    
+    // 计算结果池
+    private final ObjectPool<CalculationResult> resultPool;
+    
+    @PostConstruct
+    public void initializePools() {
+        // 初始化大对象池
+        largeObjectPool = new GenericObjectPool<>(
+            new LargeDataObjectFactory(),
+            createPoolConfig(50, 200, Duration.ofMinutes(30))
+        );
+        
+        // 初始化缓冲区池
+        bufferPool = new GenericObjectPool<>(
+            new ByteBufferFactory(1024 * 1024), // 1MB buffers
+            createPoolConfig(20, 100, Duration.ofMinutes(10))
+        );
+        
+        // 初始化计算结果池
+        resultPool = new GenericObjectPool<>(
+            new CalculationResultFactory(),
+            createPoolConfig(100, 500, Duration.ofMinutes(5))
+        );
+    }
+    
+    /**
+     * 借用大对象
+     */
+    public LargeDataObject borrowLargeObject() throws Exception {
+        return largeObjectPool.borrowObject();
+    }
+    
+    /**
+     * 归还大对象
+     */
+    public void returnLargeObject(LargeDataObject obj) {
+        if (obj != null) {
+            obj.reset(); // 重置对象状态
+            largeObjectPool.returnObject(obj);
+        }
+    }
+    
+    /**
+     * 使用对象池的模板方法
+     */
+    public <T> T usePooledObject(ObjectPool<T> pool, Function<T, T> processor) {
+        T obj = null;
+        try {
+            obj = pool.borrowObject();
+            return processor.apply(obj);
+        } catch (Exception e) {
+            throw new RuntimeException("对象池操作失败", e);
+        } finally {
+            if (obj != null) {
+                pool.returnObject(obj);
+            }
+        }
+    }
+    
+    private GenericObjectPoolConfig<Object> createPoolConfig(
+            int minIdle, int maxTotal, Duration maxIdleTime) {
+        GenericObjectPoolConfig<Object> config = new GenericObjectPoolConfig<>();
+        config.setMinIdle(minIdle);
+        config.setMaxTotal(maxTotal);
+        config.setMaxIdleTime(maxIdleTime);
+        config.setTestOnBorrow(true);
+        config.setTestOnReturn(true);
+        config.setBlockWhenExhausted(true);
+        config.setMaxWait(Duration.ofSeconds(5));
+        return config;
+    }
+}
+```
+
+### 3. 批量数据处理
+```java
+// 大批量数据的内存友好处理
+@Service
+@RequiredArgsConstructor
+public class BatchDataProcessor {
+    
+    private final MemoryPoolManager poolManager;
+    private final ExecutorService executorService;
+    
+    // 批处理配置
+    @Value("${app.batch.size:1000}")
+    private int batchSize;
+    
+    @Value("${app.batch.parallel-threads:4}")
+    private int parallelThreads;
+    
+    /**
+     * 流式处理大数据集
+     */
+    public <T, R> List<R> processLargeDataset(
+            List<T> dataset, 
+            Function<List<T>, List<R>> processor) {
+        
+        if (dataset.size() <= batchSize) {
+            return processor.apply(dataset);
+        }
+        
+        // 分批并行处理
+        List<CompletableFuture<List<R>>> futures = new ArrayList<>();
+        
+        for (int i = 0; i < dataset.size(); i += batchSize) {
+            int endIndex = Math.min(i + batchSize, dataset.size());
+            List<T> batch = dataset.subList(i, endIndex);
+            
+            CompletableFuture<List<R>> future = CompletableFuture
+                .supplyAsync(() -> processor.apply(batch), executorService)
+                .exceptionally(throwable -> {
+                    log.error("批处理失败", throwable);
+                    return Collections.emptyList();
+                });
+            
+            futures.add(future);
+        }
+        
+        // 收集所有结果
+        return futures.stream()
+            .map(CompletableFuture::join)
+            .flatMap(List::stream)
+            .collect(Collectors.toList());
+    }
+    
+    /**
+     * 内存感知的数据聚合
+     */
+    public Map<String, Object> aggregateDataWithMemoryLimit(
+            Stream<DataPoint> dataStream,
+            List<AggregationFunction> functions) {
+        
+        Map<String, Object> results = new ConcurrentHashMap<>();
+        AtomicLong processedCount = new AtomicLong(0);
+        
+        // 分批处理流数据
+        dataStream
+            .collect(groupingBy(
+                dp -> processedCount.getAndIncrement() / batchSize,
+                Collectors.toList()
+            ))
+            .entrySet()
+            .parallelStream()
+            .forEach(entry -> {
+                List<DataPoint> batch = entry.getValue();
+                
+                // 使用对象池处理批次
+                poolManager.usePooledObject(
+                    poolManager.getCalculationResultPool(),
+                    resultObj -> {
+                        // 在池化对象中进行计算
+                        Map<String, Object> batchResults = 
+                            calculateBatchAggregation(batch, functions, resultObj);
+                        
+                        // 合并结果
+                        mergeBatchResults(results, batchResults);
+                        
+                        return resultObj;
+                    }
+                );
+            });
+        
+        return results;
+    }
+    
+    /**
+     * 内存监控的迭代处理
+     */
+    public <T> void processWithMemoryMonitoring(
+            Iterator<T> dataIterator,
+            Consumer<T> processor,
+            MemoryThreshold threshold) {
+        
+        MemoryMonitor monitor = new MemoryMonitor();
+        int processedCount = 0;
+        
+        while (dataIterator.hasNext()) {
+            T item = dataIterator.next();
+            
+            // 检查内存使用率
+            if (monitor.getUsedPercentage() > threshold.getWarningLevel()) {
+                if (monitor.getUsedPercentage() > threshold.getCriticalLevel()) {
+                    // 临界状态：强制GC并暂停
+                    System.gc();
+                    try {
+                        Thread.sleep(100);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                } else {
+                    // 警告状态：降低处理速度
+                    try {
+                        Thread.sleep(10);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+            
+            processor.accept(item);
+            processedCount++;
+            
+            // 定期输出进度
+            if (processedCount % 1000 == 0) {
+                log.info("已处理 {} 条数据，内存使用率: {}%", 
+                    processedCount, monitor.getUsedPercentage());
+            }
+        }
+    }
+}
+```
+
+## 缓存策略设计
+
+### 1. 多级缓存架构
+```java
+@Configuration
+@EnableCaching
+public class MultiLevelCacheConfig {
+    
+    /**
+     * L1缓存：JVM本地缓存
+     */
+    @Bean("l1Cache")
+    public CacheManager l1CacheManager() {
+        CaffeineCacheManager cacheManager = new CaffeineCacheManager();
+        cacheManager.setCaffeine(Caffeine.newBuilder()
+            .initialCapacity(1000)
+            .maximumSize(10000)
+            .expireAfterWrite(Duration.ofMinutes(30))
+            .expireAfterAccess(Duration.ofMinutes(10))
+            .recordStats()
+            .removalListener((key, value, cause) -> {
+                log.debug("L1缓存移除: key={}, cause={}", key, cause);
+            }));
+        return cacheManager;
+    }
+    
+    /**
+     * L2缓存：Redis分布式缓存
+     */
+    @Bean("l2Cache")
+    public CacheManager l2CacheManager(RedisConnectionFactory connectionFactory) {
+        RedisCacheConfiguration config = RedisCacheConfiguration.defaultCacheConfig()
+            .entryTtl(Duration.ofHours(2))
+            .serializeKeysWith(RedisSerializationContext.SerializationPair
+                .fromSerializer(new StringRedisSerializer()))
+            .serializeValuesWith(RedisSerializationContext.SerializationPair
+                .fromSerializer(new Jackson2JsonRedisSerializer<>(Object.class)))
+            .computePrefixWith(cacheName -> "app:cache:" + cacheName + ":")
+            .disableCachingNullValues();
+        
+        return RedisCacheManager.builder(connectionFactory)
+            .cacheDefaults(config)
+            .transactionAware()
+            .build();
+    }
+    
+    /**
+     * 复合缓存管理器
+     */
+    @Bean
+    @Primary
+    public CacheManager compositeCacheManager(
+            @Qualifier("l1Cache") CacheManager l1Cache,
+            @Qualifier("l2Cache") CacheManager l2Cache) {
+        
+        CompositeCacheManager composite = new CompositeCacheManager(l1Cache, l2Cache);
+        composite.setFallbackToNoOpCache(false);
+        return composite;
+    }
+}
+
+// 智能缓存服务
+@Service
+@RequiredArgsConstructor
+public class SmartCacheService {
+    
+    @Qualifier("l1Cache")
+    private final CacheManager l1CacheManager;
+    
+    @Qualifier("l2Cache") 
+    private final CacheManager l2CacheManager;
+    
+    private final MemoryMonitor memoryMonitor;
+    
+    /**
+     * 智能缓存策略
+     */
+    public void smartCache(String cacheName, String key, Object value, CacheLevel level) {
+        switch (level) {
+            case HOT:
+                // 热数据：L1 + L2
+                cacheInLevel1(cacheName, key, value, Duration.ofMinutes(30));
+                cacheInLevel2(cacheName, key, value, Duration.ofHours(2));
+                break;
+                
+            case WARM:
+                // 温数据：仅L2，内存充足时放入L1
+                cacheInLevel2(cacheName, key, value, Duration.ofHours(1));
+                if (memoryMonitor.getUsedPercentage() < 60) {
+                    cacheInLevel1(cacheName, key, value, Duration.ofMinutes(15));
+                }
+                break;
+                
+            case COLD:
+                // 冷数据：仅L2，较长TTL
+                cacheInLevel2(cacheName, key, value, Duration.ofHours(6));
+                break;
+        }
+    }
+    
+    /**
+     * 预热关键数据
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    public void warmupCriticalData() {
+        log.info("开始预热关键数据...");
+        
+        CompletableFuture.runAsync(() -> {
+            // 预热用户配置数据
+            warmupUserConfigs();
+            
+            // 预热系统配置
+            warmupSystemConfigs();
+            
+            // 预热热点商品数据
+            warmupHotProducts();
+            
+            log.info("关键数据预热完成");
+        });
+    }
+    
+    private void warmupUserConfigs() {
+        // 从数据库加载活跃用户配置
+        List<UserConfig> configs = userConfigRepository.findActiveConfigs();
+        
+        configs.parallelStream().forEach(config -> {
+            String key = "user:config:" + config.getUserId();
+            smartCache("userConfigs", key, config, CacheLevel.HOT);
+        });
+    }
+}
+
+enum CacheLevel {
+    HOT,    // 热数据：高频访问
+    WARM,   // 温数据：中频访问  
+    COLD    // 冷数据：低频访问
+}
+```
+
+### 2. 内存监控与告警
+```java
+@Component
+@Slf4j
+public class MemoryMonitor {
+    
+    private final MemoryMXBean memoryBean;
+    private final List<MemoryPoolMXBean> memoryPoolBeans;
+    private final ApplicationEventPublisher eventPublisher;
+    
+    // 阈值配置
+    @Value("${app.memory.warning-threshold:70}")
+    private double warningThreshold;
+    
+    @Value("${app.memory.critical-threshold:85}")
+    private double criticalThreshold;
+    
+    public MemoryMonitor(ApplicationEventPublisher eventPublisher) {
+        this.eventPublisher = eventPublisher;
+        this.memoryBean = ManagementFactory.getMemoryMXBean();
+        this.memoryPoolBeans = ManagementFactory.getMemoryPoolMXBeans();
+    }
+    
+    /**
+     * 获取当前内存使用情况
+     */
+    public MemoryUsage getCurrentUsage() {
+        MemoryUsage heapUsage = memoryBean.getHeapMemoryUsage();
+        
+        double usedPercentage = (double) heapUsage.getUsed() / heapUsage.getMax() * 100;
+        
+        return MemoryUsage.builder()
+            .used(heapUsage.getUsed())
+            .max(heapUsage.getMax())
+            .usedPercentage(usedPercentage)
+            .committed(heapUsage.getCommitted())
+            .build();
+    }
+    
+    /**
+     * 定期监控内存使用情况
+     */
+    @Scheduled(fixedRate = 30000) // 30秒检查一次
+    public void monitorMemoryUsage() {
+        MemoryUsage usage = getCurrentUsage();
+        
+        if (usage.getUsedPercentage() > criticalThreshold) {
+            // 发布内存临界事件
+            eventPublisher.publishEvent(new MemoryCriticalEvent(usage));
+            log.error("内存使用率达到临界水平: {}%", usage.getUsedPercentage());
+            
+        } else if (usage.getUsedPercentage() > warningThreshold) {
+            // 发布内存警告事件
+            eventPublisher.publishEvent(new MemoryWarningEvent(usage));
+            log.warn("内存使用率超过警告水平: {}%", usage.getUsedPercentage());
+        }
+        
+        // 记录详细的内存池信息
+        logMemoryPoolDetails();
+    }
+    
+    /**
+     * 记录各内存池的详细信息
+     */
+    private void logMemoryPoolDetails() {
+        memoryPoolBeans.forEach(pool -> {
+            MemoryUsage usage = pool.getUsage();
+            if (usage != null) {
+                double poolUsedPercentage = (double) usage.getUsed() / usage.getMax() * 100;
+                
+                if (poolUsedPercentage > warningThreshold) {
+                    log.warn("内存池 {} 使用率: {}%", pool.getName(), poolUsedPercentage);
+                }
+            }
+        });
+    }
+    
+    /**
+     * 触发内存清理
+     */
+    public void triggerMemoryCleanup() {
+        log.info("触发内存清理...");
+        
+        // 发布内存清理事件
+        eventPublisher.publishEvent(new MemoryCleanupEvent());
+        
+        // 建议JVM进行垃圾回收
+        System.gc();
+        
+        // 等待一段时间后再次检查
+        try {
+            Thread.sleep(1000);
+            MemoryUsage usageAfterGC = getCurrentUsage();
+            log.info("GC后内存使用率: {}%", usageAfterGC.getUsedPercentage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+}
+
+// 内存事件处理器
+@Component
+@RequiredArgsConstructor
+@EventListener
+public class MemoryEventHandler {
+    
+    private final SmartCacheService cacheService;
+    private final MemoryDataManager dataManager;
+    
+    @EventListener
+    public void handleMemoryWarning(MemoryWarningEvent event) {
+        log.info("处理内存警告事件，当前使用率: {}%", event.getUsage().getUsedPercentage());
+        
+        // 清理部分L1缓存
+        cacheService.cleanupL1Cache(0.3); // 清理30%
+        
+        // 降低缓存策略
+        dataManager.enableMemoryConservativeMode();
+    }
+    
+    @EventListener
+    public void handleMemoryCritical(MemoryCriticalEvent event) {
+        log.error("处理内存临界事件，当前使用率: {}%", event.getUsage().getUsedPercentage());
+        
+        // 激进清理L1缓存
+        cacheService.cleanupL1Cache(0.7); // 清理70%
+        
+        // 启用内存保护模式
+        dataManager.enableMemoryProtectionMode();
+        
+        // 拒绝新的大数据请求
+        dataManager.enableRequestThrottling();
+    }
+    
+    @EventListener
+    public void handleMemoryCleanup(MemoryCleanupEvent event) {
+        log.info("处理内存清理事件");
+        
+        // 执行各种清理操作
+        cacheService.performMaintenance();
+        dataManager.cleanupExpiredData();
+    }
+}
+```
+
+## 性能优化策略
+
+### 1. 懒加载和预加载
+```java
+@Service
+@RequiredArgsConstructor
+public class DataLoadingStrategy {
+    
+    private final LoadingCache<String, Object> lazyLoadingCache;
+    private final ScheduledExecutorService preloadExecutor;
+    
+    /**
+     * 懒加载缓存配置
+     */
+    @Bean
+    public LoadingCache<String, Object> createLazyLoadingCache() {
+        return Caffeine.newBuilder()
+            .initialCapacity(500)
+            .maximumSize(5000)
+            .expireAfterWrite(Duration.ofMinutes(60))
+            .refreshAfterWrite(Duration.ofMinutes(30))
+            .recordStats()
+            .build(key -> loadDataFromSource(key)); // 懒加载函数
+    }
+    
+    /**
+     * 智能预加载策略
+     */
+    public void preloadCriticalData() {
+        // 基于访问模式预加载
+        List<String> criticalKeys = getCriticalDataKeys();
+        
+        criticalKeys.parallelStream()
+            .forEach(key -> {
+                try {
+                    // 异步预加载
+                    CompletableFuture.supplyAsync(() -> {
+                        return lazyLoadingCache.get(key);
+                    }, preloadExecutor)
+                    .exceptionally(throwable -> {
+                        log.warn("预加载失败: key={}", key, throwable);
+                        return null;
+                    });
+                } catch (Exception e) {
+                    log.warn("预加载异常: key={}", key, e);
+                }
+            });
+    }
+    
+    /**
+     * 基于访问模式的智能预加载
+     */
+    @Scheduled(cron = "0 */30 * * * *") // 每30分钟执行
+    public void intelligentPreload() {
+        // 分析访问模式
+        Map<String, AccessPattern> patterns = analyzeAccessPatterns();
+        
+        patterns.entrySet().stream()
+            .filter(entry -> entry.getValue().shouldPreload())
+            .map(Map.Entry::getKey)
+            .forEach(key -> {
+                preloadExecutor.schedule(() -> {
+                    try {
+                        lazyLoadingCache.refresh(key);
+                        log.debug("智能预加载完成: key={}", key);
+                    } catch (Exception e) {
+                        log.warn("智能预加载失败: key={}", key, e);
+                    }
+                }, calculateOptimalPreloadDelay(key), TimeUnit.MILLISECONDS);
+            });
+    }
+    
+    private Object loadDataFromSource(String key) {
+        // 实际的数据加载逻辑
+        log.debug("从数据源加载数据: key={}", key);
+        
+        // 这里实现具体的数据加载逻辑
+        return dataRepository.findByKey(key);
+    }
+}
+```
+
+### 2. 内存泄漏防护
+```java
+@Component
+@Slf4j
+public class MemoryLeakGuard {
+    
+    private final Map<String, WeakReference<Object>> weakReferenceMap = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService cleanupExecutor;
+    
+    /**
+     * 使用弱引用防止内存泄漏
+     */
+    public void registerWeakReference(String key, Object value) {
+        weakReferenceMap.put(key, new WeakReference<>(value));
+    }
+    
+    /**
+     * 定期清理已被GC的弱引用
+     */
+    @Scheduled(fixedRate = 300000) // 5分钟清理一次
+    public void cleanupWeakReferences() {
+        int beforeSize = weakReferenceMap.size();
+        
+        weakReferenceMap.entrySet().removeIf(entry -> entry.getValue().get() == null);
+        
+        int afterSize = weakReferenceMap.size();
+        if (beforeSize != afterSize) {
+            log.debug("清理弱引用: {} -> {}", beforeSize, afterSize);
+        }
+    }
+    
+    /**
+     * 监控可能的内存泄漏
+     */
+    @Scheduled(fixedRate = 600000) // 10分钟检查一次
+    public void detectPotentialMemoryLeaks() {
+        // 检查长期持有的大对象
+        MemoryUsage usage = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage();
+        
+        if (usage.getUsed() > usage.getMax() * 0.8) {
+            // 触发内存分析
+            analyzeMemoryUsage();
+        }
+    }
+    
+    private void analyzeMemoryUsage() {
+        // 使用JVM工具分析内存使用
+        log.warn("检测到可能的内存压力，开始分析...");
+        
+        // 记录当前线程栈信息
+        ThreadMXBean threadBean = ManagementFactory.getThreadMXBean();
+        ThreadInfo[] threadInfos = threadBean.dumpAllThreads(true, true);
+        
+        for (ThreadInfo info : threadInfos) {
+            if (info.getBlockedTime() > 10000) { // 阻塞超过10秒
+                log.warn("检测到长时间阻塞的线程: {}", info.getThreadName());
+            }
+        }
+    }
+}
+```
+
+## 配置和监控
+
+### 1. JVM参数优化
+```yaml
+# application.yml - JVM和内存相关配置
+spring:
+  application:
+    name: memory-intensive-app
+
+# 自定义内存配置
+app:
+  memory:
+    # 内存阈值设置
+    warning-threshold: 70
+    critical-threshold: 85
+    cleanup-threshold: 90
+    
+    # 缓存配置
+    cache:
+      l1:
+        initial-capacity: 1000
+        maximum-size: 10000
+        expire-after-write: 30m
+        expire-after-access: 10m
+      l2:
+        ttl: 2h
+        max-idle-time: 1h
+    
+    # 批处理配置
+    batch:
+      size: 1000
+      parallel-threads: 4
+      max-memory-per-batch: 100MB
+    
+    # 对象池配置
+    pool:
+      large-object:
+        min-idle: 50
+        max-total: 200
+        max-idle-time: 30m
+      buffer:
+        min-idle: 20
+        max-total: 100
+        buffer-size: 1MB
+
+# Actuator监控配置
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,memory,caches
+  endpoint:
+    health:
+      show-details: always
+    metrics:
+      enabled: true
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+```
+
+### 2. 启动参数建议
+```bash
+# JVM启动参数优化建议
+java -server \
+  -Xms2g -Xmx8g \
+  -XX:NewRatio=1 \
+  -XX:+UseG1GC \
+  -XX:MaxGCPauseMillis=200 \
+  -XX:+UnlockExperimentalVMOptions \
+  -XX:+UseStringDeduplication \
+  -XX:+PrintGCDetails \
+  -XX:+PrintGCTimeStamps \
+  -XX:+HeapDumpOnOutOfMemoryError \
+  -XX:HeapDumpPath=/var/log/app/heapdump.hprof \
+  -Djava.security.egd=file:/dev/./urandom \
+  -jar memory-intensive-app.jar
+```
+
+## 最佳实践总结
+
+### 1. 内存使用原则
+- **分层存储** - 热数据内存，温数据缓存，冷数据数据库
+- **懒加载** - 按需加载，避免一次性加载大量数据
+- **批处理** - 大数据集分批处理，控制内存峰值
+- **对象复用** - 使用对象池减少GC压力
+- **弱引用** - 对于可选的缓存数据使用弱引用
+
+### 2. 监控告警
+- **内存使用率监控** - 实时监控堆内存使用情况
+- **GC性能监控** - 监控垃圾回收频率和耗时
+- **缓存命中率** - 监控各级缓存的命中率
+- **对象池状态** - 监控对象池的借用和归还情况
+
+### 3. 应急处理
+- **优雅降级** - 内存不足时自动降级服务质量
+- **限流保护** - 高内存压力时限制新请求
+- **缓存清理** - 自动清理低优先级缓存数据
+- **故障转移** - 极端情况下的数据持久化和恢复
+
+通过这些设计策略，可以构建出高效、稳定的内存密集型模块，在保证性能的同时避免内存相关的问题。

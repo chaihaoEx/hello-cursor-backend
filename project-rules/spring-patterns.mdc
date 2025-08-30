@@ -1,0 +1,376 @@
+---
+description: Spring Boot开发的现代架构模式和最佳实践指南
+globs: ["**/*.java", "**/application.yml", "**/application.properties", "**/pom.xml", "**/build.gradle"]
+alwaysApply: false
+---
+
+# Spring Boot 开发模式
+
+编写符合现代Spring Boot架构推荐和最佳实践的惯用Java代码。
+
+## 核心理念
+
+- Spring Boot是企业级Java开发的首选框架 - 拥抱其约定优于配置的设计
+- 避免过度工程化和不必要的抽象层
+- 专注于简洁性、清晰性和Spring原生数据流
+- 让Spring Boot处理复杂性 - 不要与框架对抗
+
+## 架构指导原则
+
+### 1. 拥抱分层架构
+
+遵循Spring Boot推荐的分层模式：
+- `@RestController` - Web层，处理HTTP请求
+- `@Service` - 业务逻辑层，封装业务规则
+- `@Repository` - 数据访问层，处理数据持久化
+- `@Component` - 通用组件，工具类和配置
+- `@Configuration` - 配置类，Bean定义和自动配置
+
+### 2. 依赖注入最佳实践
+
+- 优先使用构造器注入而非字段注入
+- 使用`@RequiredArgsConstructor`（Lombok）简化构造器
+- 避免循环依赖，重构代码结构
+- 使用接口抽象服务层依赖
+
+### 3. 现代异步模式
+
+- 使用`CompletableFuture`和`@Async`进行异步处理
+- 利用`WebFlux`进行响应式编程（适当时）
+- 使用`@Transactional`管理事务边界
+- 优雅处理异常和错误传播
+
+### 4. 配置管理
+
+- 使用`application.yml`而非`.properties`
+- 利用`@ConfigurationProperties`绑定配置
+- 使用profile进行环境隔离
+- 外部化敏感配置信息
+
+### 5. 代码组织
+
+- 按功能模块组织，而非技术层次（避免controllers/、services/、repositories/文件夹）
+- 保持相关代码在同一包中
+- 使用包级别的package-info.java说明模块职责
+- 遵循Java命名约定和Spring Boot约定
+
+## 实现模式
+
+### 基础REST控制器
+```java
+@RestController
+@RequestMapping("/api/users")
+@RequiredArgsConstructor
+@Validated
+public class UserController {
+    
+    private final UserService userService;
+    
+    @GetMapping("/{id}")
+    public ResponseEntity<UserResponse> getUser(@PathVariable @Positive Long id) {
+        UserResponse user = userService.findById(id);
+        return ResponseEntity.ok(user);
+    }
+    
+    @PostMapping
+    public ResponseEntity<UserResponse> createUser(
+            @RequestBody @Valid CreateUserRequest request) {
+        UserResponse user = userService.create(request);
+        return ResponseEntity.status(HttpStatus.CREATED).body(user);
+    }
+    
+    @ExceptionHandler(UserNotFoundException.class)
+    public ResponseEntity<ErrorResponse> handleUserNotFound(UserNotFoundException e) {
+        ErrorResponse error = ErrorResponse.builder()
+            .message(e.getMessage())
+            .timestamp(LocalDateTime.now())
+            .build();
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
+    }
+}
+```
+
+### 服务层模式
+```java
+@Service
+@RequiredArgsConstructor
+@Transactional(readOnly = true)
+public class UserService {
+    
+    private final UserRepository userRepository;
+    private final UserMapper userMapper;
+    private final EventPublisher eventPublisher;
+    
+    public UserResponse findById(Long id) {
+        User user = userRepository.findById(id)
+            .orElseThrow(() -> new UserNotFoundException("用户不存在: " + id));
+        return userMapper.toResponse(user);
+    }
+    
+    @Transactional
+    public UserResponse create(CreateUserRequest request) {
+        // 业务规则验证
+        validateUserCreation(request);
+        
+        // 创建实体
+        User user = userMapper.toEntity(request);
+        User savedUser = userRepository.save(user);
+        
+        // 发布领域事件
+        eventPublisher.publishEvent(new UserCreatedEvent(savedUser.getId()));
+        
+        return userMapper.toResponse(savedUser);
+    }
+    
+    private void validateUserCreation(CreateUserRequest request) {
+        if (userRepository.existsByEmail(request.getEmail())) {
+            throw new UserAlreadyExistsException("邮箱已存在: " + request.getEmail());
+        }
+    }
+}
+```
+
+### 数据访问层模式
+```java
+@Repository
+public interface UserRepository extends JpaRepository<User, Long> {
+    
+    @Query("SELECT u FROM User u WHERE u.email = :email AND u.active = true")
+    Optional<User> findActiveByEmail(@Param("email") String email);
+    
+    @Query(value = "SELECT * FROM users u WHERE u.created_date >= :date", 
+           nativeQuery = true)
+    List<User> findUsersCreatedAfter(@Param("date") LocalDateTime date);
+    
+    boolean existsByEmail(String email);
+    
+    @Modifying
+    @Query("UPDATE User u SET u.lastLoginDate = :date WHERE u.id = :id")
+    void updateLastLoginDate(@Param("id") Long id, @Param("date") LocalDateTime date);
+}
+```
+
+### 配置属性绑定
+```java
+@ConfigurationProperties(prefix = "app.security")
+@Data
+@Component
+public class SecurityProperties {
+    
+    private Jwt jwt = new Jwt();
+    private Session session = new Session();
+    
+    @Data
+    public static class Jwt {
+        private String secret;
+        private Duration expiration = Duration.ofHours(24);
+        private String issuer = "myapp";
+    }
+    
+    @Data
+    public static class Session {
+        private Duration timeout = Duration.ofMinutes(30);
+        private boolean persistent = false;
+    }
+}
+```
+
+### 异步处理模式
+```java
+@Service
+@RequiredArgsConstructor
+public class NotificationService {
+    
+    private final EmailService emailService;
+    private final SmsService smsService;
+    
+    @Async("taskExecutor")
+    public CompletableFuture<Void> sendWelcomeNotification(User user) {
+        try {
+            // 并行发送邮件和短信
+            CompletableFuture<Void> emailFuture = emailService.sendWelcomeEmail(user);
+            CompletableFuture<Void> smsFuture = smsService.sendWelcomeSms(user);
+            
+            return CompletableFuture.allOf(emailFuture, smsFuture);
+        } catch (Exception e) {
+            log.error("发送欢迎通知失败: {}", user.getId(), e);
+            throw new NotificationException("通知发送失败", e);
+        }
+    }
+}
+
+@Configuration
+@EnableAsync
+public class AsyncConfig {
+    
+    @Bean("taskExecutor")
+    public TaskExecutor taskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(5);
+        executor.setMaxPoolSize(10);
+        executor.setQueueCapacity(25);
+        executor.setThreadNamePrefix("async-task-");
+        executor.initialize();
+        return executor;
+    }
+}
+```
+
+## 最佳实践
+
+### 推荐做法：
+- 使用构造器注入提高可测试性
+- 利用Spring Boot Starter简化依赖管理
+- 使用`@Valid`和`@Validated`进行参数校验
+- 明确处理加载和错误状态
+- 保持控制器专注于HTTP协议处理
+- 使用Java的类型系统保证安全性
+- 利用Spring Boot Actuator进行监控
+- 使用Spring Boot DevTools提高开发效率
+
+### 避免做法：
+- 不要为每个实体都创建对应的Service
+- 不要在Controller中编写业务逻辑
+- 不要忽视事务边界的设计
+- 不要过度使用`@Autowired`字段注入
+- 不要在配置类中编写业务逻辑
+- 不要忽视Spring Security的最佳实践
+
+## 测试策略
+
+### 单元测试
+```java
+@ExtendWith(MockitoExtension.class)
+class UserServiceTest {
+    
+    @Mock
+    private UserRepository userRepository;
+    
+    @Mock
+    private UserMapper userMapper;
+    
+    @InjectMocks
+    private UserService userService;
+    
+    @Test
+    @DisplayName("根据ID查找用户 - 成功场景")
+    void findById_Success() {
+        // Given
+        Long userId = 1L;
+        User user = User.builder().id(userId).email("test@example.com").build();
+        UserResponse expected = UserResponse.builder().id(userId).build();
+        
+        when(userRepository.findById(userId)).thenReturn(Optional.of(user));
+        when(userMapper.toResponse(user)).thenReturn(expected);
+        
+        // When
+        UserResponse actual = userService.findById(userId);
+        
+        // Then
+        assertThat(actual).isEqualTo(expected);
+    }
+}
+```
+
+### 集成测试
+```java
+@SpringBootTest
+@TestPropertySource(locations = "classpath:test.properties")
+@Transactional
+class UserServiceIntegrationTest {
+    
+    @Autowired
+    private UserService userService;
+    
+    @Autowired
+    private TestEntityManager entityManager;
+    
+    @Test
+    @DisplayName("创建用户集成测试")
+    void createUser_Integration() {
+        // Given
+        CreateUserRequest request = CreateUserRequest.builder()
+            .email("test@example.com")
+            .name("测试用户")
+            .build();
+        
+        // When
+        UserResponse response = userService.create(request);
+        
+        // Then
+        assertThat(response.getId()).isNotNull();
+        assertThat(response.getEmail()).isEqualTo("test@example.com");
+        
+        // 验证数据库状态
+        User savedUser = entityManager.find(User.class, response.getId());
+        assertThat(savedUser).isNotNull();
+    }
+}
+```
+
+## 现代Spring特性
+
+### Spring Boot 3.x特性
+- 使用Java 17+的现代语法特性
+- 利用Spring Native进行原生编译（适当时）
+- 使用记录类（Record）作为DTO
+- 拥抱虚拟线程（Project Loom，适当时）
+- 使用观测性工具（Micrometer, OpenTelemetry）
+
+### 安全最佳实践
+```java
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+    
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        return http
+            .csrf(csrf -> csrf.disable())
+            .sessionManagement(session -> 
+                session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/api/public/**").permitAll()
+                .requestMatchers("/api/admin/**").hasRole("ADMIN")
+                .anyRequest().authenticated())
+            .oauth2ResourceServer(oauth2 -> 
+                oauth2.jwt(Customizer.withDefaults()))
+            .build();
+    }
+}
+```
+
+## 性能优化
+
+### 数据库优化
+- 使用连接池配置（HikariCP）
+- 合理使用缓存（`@Cacheable`, `@CacheEvict`）
+- 优化JPA查询，避免N+1问题
+- 使用数据库索引和查询优化
+
+### 监控和观测
+```java
+@RestController
+@Timed // Micrometer指标
+public class MetricsController {
+    
+    private final MeterRegistry meterRegistry;
+    
+    @GetMapping("/api/business-metric")
+    public ResponseEntity<String> businessOperation() {
+        Timer.Sample sample = Timer.start(meterRegistry);
+        try {
+            // 业务逻辑
+            return ResponseEntity.ok("success");
+        } finally {
+            sample.stop(Timer.builder("business.operation")
+                .description("业务操作耗时")
+                .register(meterRegistry));
+        }
+    }
+}
+```
+
+## 总结
+
+编写看起来和感觉都像Spring Boot的Java代码。该框架已经非常成熟 - 信任其模式和工具。专注于解决用户问题，而不是实现来自其他平台的架构模式。利用Spring生态系统的强大功能，同时保持代码的简洁性和可维护性。
