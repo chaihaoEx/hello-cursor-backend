@@ -155,11 +155,16 @@ logging:
   level:
     com:
       kinkle: INFO
+      kinkle.helloquick.udp: DEBUG
     org:
       springframework:
         web: DEBUG
         cache: DEBUG
         data:
           redis: DEBUG
+      netty: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
 
 

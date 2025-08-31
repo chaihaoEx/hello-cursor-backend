@@ -1,4 +1,50 @@
 {
     "java.configuration.updateBuildConfiguration": "interactive",
-    "java.compile.nullAnalysis.mode": "automatic"
+    "java.compile.nullAnalysis.mode": "automatic",
+
+    // 终端默认配置文件
+    "terminal.integrated.defaultProfile.windows": "PowerShell",
+
+    // 终端配置
+    "terminal.integrated.profiles.windows": {
+        "PowerShell": {
+            "source": "PowerShell",
+            "icon": "terminal-powershell"
+        },
+        "Command Prompt": {
+            "path": [
+                "${env:windir}\\Sysnative\\cmd.exe",
+                "${env:windir}\\System32\\cmd.exe"
+            ],
+            "args": [],
+            "icon": "terminal-cmd"
+        },
+        "Git Bash": {
+            "source": "Git Bash"
+        },
+        "Ubuntu": {
+            "path": "C:\\Windows\\System32\\wsl.exe",
+            "args": ["-d", "Ubuntu"],
+            "icon": "terminal-linux"
+        },
+        "Ubuntu-20.04": {
+            "path": "C:\\Windows\\System32\\wsl.exe",
+            "args": ["-d", "Ubuntu-20.04"],
+            "icon": "terminal-linux"
+        },
+        "Windows PowerShell": {
+            "path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            "args": [],
+            "icon": "terminal-powershell"
+        }
+    },
+
+    // 启用终端的GPU加速
+    "terminal.integrated.gpuAcceleration": "on",
+
+    // 终端光标样式
+    "terminal.integrated.cursorStyle": "line",
+
+    // 终端滚动条
+    "terminal.integrated.scrollback": 10000
 }
